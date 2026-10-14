@@ -66,7 +66,7 @@ The plugin only reads. It never blocks or changes a tool call; if it fails while
 At the prompt of a terminal Claude Code session:
 
 ```
-/plugin install activity-line --marketplace OWNER/claude-activity-line
+/plugin install activity-line --marketplace sarthakkhandelwal1999/claude-activity-line
 ```
 
 Answer `y` to add the marketplace, then choose the **user** scope so it runs in every project. It starts working in that session.
@@ -74,7 +74,7 @@ Answer `y` to add the marketplace, then choose the **user** scope so it runs in 
 From the command line instead:
 
 ```sh
-claude plugin marketplace add OWNER/claude-activity-line
+claude plugin marketplace add sarthakkhandelwal1999/claude-activity-line
 claude plugin install activity-line@activity-line --scope user
 ```
 
