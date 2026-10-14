@@ -1,0 +1,25 @@
+{
+  "name": "activity-line",
+  "version": "0.2.0",
+  "description": "A colour-coded line under the prompt and an /activity dashboard: context fill, rate limits, cost, running tools, running agents and todo progress.",
+  "author": { "name": "Sarthak Khandelwal" },
+  "license": "MIT",
+  "keywords": ["status line", "context", "rate limits", "agents", "todos"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "placement": {
+      "type": "string",
+      "title": "Where the activity line goes",
+      "description": "below: under the prompt, beneath the hint row. above: in the band above the prompt. pane-only: no line; use /activity.",
+      "default": "below",
+      "options": ["below", "above", "pane-only"]
+    },
+    "openPane": {
+      "type": "string",
+      "title": "Open the dashboard at session start",
+      "description": "auto: only where there is no line under the prompt (VS Code, mobile). always. never: open it with /activity.",
+      "default": "auto",
+      "options": ["auto", "always", "never"]
+    }
+  }
+}

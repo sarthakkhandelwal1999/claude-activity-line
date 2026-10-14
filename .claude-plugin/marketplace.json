@@ -1,0 +1,16 @@
+{
+  "name": "activity-line",
+  "owner": {
+    "name": "Sarthak Khandelwal"
+  },
+  "metadata": {
+    "description": "Colour-coded session activity for Claude Code: context, rate limits, tools, agents and todos."
+  },
+  "plugins": [
+    {
+      "name": "activity-line",
+      "source": "./",
+      "description": "A colour-coded line under the prompt and an /activity dashboard: context fill, rate limits, cost, running tools, running agents and todo progress."
+    }
+  ]
+}
