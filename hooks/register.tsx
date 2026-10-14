@@ -4,7 +4,7 @@ import type { AgentStatus, EngineInterface, Register, RenderSurface, Timer } fro
 import type { ActivityAgent, ActivityCategory, ActivitySnapshot, ActivityTask, ActivityTodo, ActivityTool } from '../types'
 import { demoSnapshot } from './demo'
 import { dashboard, line } from './draw'
-import { fit, plain } from './model'
+import { fit, plain, summary } from './model'
 
 const PANE = 'activity'
 const TICK_MS = 1000
@@ -40,7 +40,9 @@ let statusText: string | undefined
 let breakdownAt = 0
 let breakdownPending: Timer | undefined
 let ticker: Timer | undefined
-const openedFor = new Set<string>()
+// /activity output rows: the newest stays live, older ones fold to a line.
+const seenRows = new Set<string>()
+let newestRow: string | undefined
 let nextId = 0
 
 function current(now: number): ActivitySnapshot {
@@ -177,7 +179,7 @@ async function restore($: EngineInterface): Promise<void> {
 
 export const register: Register = (on, options) => {
   const placement = String(options.placement ?? 'below')
-  const openPane = String(options.openPane ?? 'auto')
+  const openPane = String(options.openPane ?? 'never')
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -192,10 +194,7 @@ export const register: Register = (on, options) => {
     await measureBreakdown($).catch(() => undefined)
     await publish($)
 
-    const hasLine = surfaces.some(s => LINE_SURFACES.has(s))
-    if (openPane === 'always' || (openPane === 'auto' && surfaces.length > 0 && !hasLine)) {
-      void $.ui.open({ id: PANE, title: 'Activity' })
-    }
+    if (openPane === 'always' && surfaces.includes('terminal')) void $.ui.open({ id: PANE, title: 'Activity' })
 
     ticker?.cancel()
     ticker = $.clock.every(TICK_MS, () => {
@@ -205,14 +204,10 @@ export const register: Register = (on, options) => {
   })
 
   // The VS Code panel and the other remote surfaces attach after the session
-  // starts: each new one without a line under its prompt gets the dashboard.
+  // starts; those without a line under the prompt get the status text.
   on('session.attach', async ($, e, next) => {
     const result = await next(e)
     if (!surfaces.includes(e.surface)) surfaces.push(e.surface)
-    if (openPane === 'auto' && !LINE_SURFACES.has(e.surface) && !openedFor.has(e.clientId)) {
-      openedFor.add(e.clientId)
-      void $.ui.open({ id: PANE, title: 'Activity' })
-    }
     await publish($)
     return result
   })
@@ -226,9 +221,25 @@ export const register: Register = (on, options) => {
     return result
   })
 
+  // /activity: in the terminal the dashboard opens as a pane; the VS Code
+  // panel draws no panes, so there it is drawn live in the command's own
+  // output row (below). The text is the summary the model reads, and what a
+  // surface that draws neither shows.
   on('command.run', { command: 'activity' }, async $ => {
-    const opened = await $.ui.open({ id: PANE, title: 'Activity' })
-    return { text: opened.isPlaced ? 'Activity dashboard opened.' : 'Activity dashboard opened; it shows once this surface has room for it.' }
+    if (surfaces.includes('terminal')) void $.ui.open({ id: PANE, title: 'Activity' })
+    return { text: summary(await read($, snapshot)) }
+  })
+
+  on('ui.render', { component: 'CommandOutput', props: { command: 'activity' } }, async ($, e, next) => {
+    if (e.props.isErrored) return next(e)
+    if (e.surface === 'terminal') return next({ ...e, props: { ...e.props, text: 'Activity dashboard opened above the prompt.' } })
+    if (!seenRows.has(e.requestId)) {
+      seenRows.add(e.requestId)
+      newestRow = e.requestId
+    }
+    const t = $.ui.resolve(e)
+    if (e.requestId !== newestRow) return <t.Text color="inactive">Activity snapshot; the newest /activity below is live.</t.Text>
+    return dashboard(t, await read($, snapshot), e.viewport?.columns ?? 100)
   })
 
   on('session.measure', async ($, e, next) => {

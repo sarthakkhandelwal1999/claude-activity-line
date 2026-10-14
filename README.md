@@ -87,8 +87,8 @@ claude plugin install activity-line@activity-line --scope user
 
 ## In VS Code
 
-- **The integrated terminal** (`claude` in a terminal tab) shows the colour row under the prompt, exactly as above. VS Code's terminal is xterm.js, the renderer these screenshots were taken with.
-- **The Claude Code panel** has no row under its prompt. There the plugin opens the dashboard on its own as soon as the panel connects, and also shows the line as plain status text. `/activity` reopens the dashboard at any time.
+- **For the always-visible row, run Claude Code in VS Code's terminal.** Turn on the extension's **Use Terminal** setting (`"claudeCode.useTerminal": true`), and Claude Code opens in the integrated terminal instead of the chat panel. The colour row then sits under the prompt, exactly as in the screenshots. VS Code's terminal is xterm.js, the renderer these screenshots were taken with.
+- **In the chat panel**, there's no row under the prompt and no panes. There `/activity` draws the dashboard live in its own reply in the conversation, and it keeps updating while you work. Older `/activity` replies fold to one line, so the conversation stays short. The reply's text is a short summary the model reads too, so you can ask Claude about it.
 
 ## Settings
 
@@ -97,7 +97,7 @@ The settings are in `/config`, under the plugin, or in `settings.json` under `pl
 | Setting | Values | Default |
 | --- | --- | --- |
 | `placement` | `below`: under the prompt. `above`: the band above the prompt. `pane-only`: no row; use `/activity`. | `below` |
-| `openPane` | `auto`: open the dashboard at start only where there is no row (the VS Code panel, mobile). `always`. `never`. | `auto` |
+| `openPane` | `never`: open it with `/activity`. `always`: open the dashboard pane when a terminal session starts. | `never` |
 
 ## Development
 

@@ -1,6 +1,6 @@
 {
   "name": "activity-line",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "One colour-coded row under the prompt and an /activity dashboard: context left before auto-compact, rate limits with reset times, running tools, agents and background shells, todo progress, model and cost.",
   "author": { "name": "Sarthak Khandelwal" },
   "license": "MIT",
@@ -16,10 +16,10 @@
     },
     "openPane": {
       "type": "string",
-      "title": "Open the dashboard at session start",
-      "description": "auto: only where there is no line under the prompt (VS Code, mobile). always. never: open it with /activity.",
-      "default": "auto",
-      "options": ["auto", "always", "never"]
+      "title": "Open the dashboard pane at session start",
+      "description": "never: open it with /activity. always: open it as a pane when the session starts in a terminal. The VS Code chat panel draws no panes; there /activity draws the dashboard in the transcript.",
+      "default": "never",
+      "options": ["never", "always"]
     }
   }
 }

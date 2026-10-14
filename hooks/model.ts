@@ -374,3 +374,49 @@ export function fit(s: ActivitySnapshot, columns: number): Fitted[] {
 export function plain(rows: readonly { segs: readonly Seg[] }[]): string {
   return rows.map(row => row.segs.map(seg => seg.text).join('')).join(SEPARATOR)
 }
+
+/**
+ * The whole picture as a few lines of markdown: the /activity command's text,
+ * which the model reads and which any surface can show as it is.
+ */
+export function summary(s: ActivitySnapshot): string {
+  const lines: string[] = []
+
+  const head = [
+    s.model === undefined ? undefined : `**${modelName(s.model)}**`,
+    s.startedAt === undefined ? undefined : `session ${span(s.now - s.startedAt)}`,
+    s.costUsd === undefined ? undefined : `$${s.costUsd.toFixed(2)}`,
+  ].filter(Boolean)
+  if (head.length > 0) lines.push(head.join(' · '))
+
+  const c = s.context
+  if (c?.tokens === undefined || c.percent === undefined) lines.push('- Context: no reading yet')
+  else {
+    const left = toCompact(c)
+    let after = ''
+    if (c.compactAt === undefined) after = ', auto-compact off'
+    else if (left === 0) after = ', compacts next turn'
+    else after = `, compacts at ${tokens(c.compactAt)} (${tokens(left ?? 0)} left)`
+    lines.push(`- Context: ${c.percent}% (${tokens(c.tokens)} / ${tokens(c.window)})${after}`)
+  }
+
+  if (s.rateLimits.length > 0) {
+    const limits = s.rateLimits.map(limit => {
+      const reset = resetIn(limit, s.now, true)
+      return `${limitTitle(limit.kind)} ${limit.percentUsed}%${reset === undefined ? '' : `, resets in ${reset}`}`
+    })
+    lines.push(`- Limits: ${limits.join(' · ')}`)
+  }
+
+  const running: string[] = groupTools(mainTools(s)).map(g => `${g.name}${g.count > 1 ? ` ×${g.count}` : ''} ${duration(s.now - g.startedAt)}`)
+  for (const a of s.agents) running.push(`${a.type} agent ${duration(s.now - a.since)} (${cut(a.description, 40)})`)
+  for (const task of s.tasks) running.push(`${task.type} ${duration(s.now - task.since)} (${cut(task.description, 40)})`)
+  lines.push(`- Running: ${running.length === 0 ? 'nothing' : running.join(' · ')}`)
+
+  const { done, total, active } = todoCounts(s.todos)
+  if (total > 0) {
+    const now = active === undefined ? '' : `, now: ${active.activeForm || active.content}`
+    lines.push(`- Todos: ${done}/${total} done${now}`)
+  }
+  return lines.join('\n')
+}

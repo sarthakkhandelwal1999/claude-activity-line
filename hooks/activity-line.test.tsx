@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { ActivitySnapshot } from '../types'
 import { demoSnapshot } from './demo'
-import { cells, contextTone, cut, duration, fit, lineParts, modelName, plain, resetIn, span, tokens, toolLabel, width } from './model'
+import { cells, contextTone, cut, duration, fit, lineParts, modelName, plain, resetIn, span, summary, tokens, toolLabel, width } from './model'
 
 const NOW = Date.parse('2026-10-14T12:00:00Z')
 const DEMO = demoSnapshot(NOW)
@@ -203,5 +203,49 @@ describe('a new conversation', () => {
 
     await $.session.end({ reason: 'resume' } as never)
     expect(await pane.find({ text: /Doing old work/ })).toBeUndefined()
+  })
+})
+
+describe('/activity', () => {
+  test('the summary the model reads', () => {
+    expect(summary(DEMO)).toBe(
+      [
+        '**Opus 5.5** · session 47m · $4.37',
+        '- Context: 66% (131k / 200k), compacts at 167k (35.6k left)',
+        '- Limits: 5-hour 83%, resets in 1h24m · 7-day 41%, resets in 3d5h',
+        '- Running: Bash 38s · Read 0s · Explore agent 1m12s (Find where the poller schedules checks) · test-runner agent 15s (Run the backend suite) · shell 4m00s (npm run dev)',
+        '- Todos: 2/5 done, now: Writing the tests',
+      ].join('\n'),
+    )
+  })
+
+  test('VS Code draws the live dashboard in the output row; the terminal a short note', async ($, on) => {
+    mock.clock(on, { now: NOW })
+    on('tool.call', () => ({ result: {} as never }))
+    on('ui.render', ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return <Text>{(e.props as { text?: string }).text ?? ''}</Text>
+    })
+    await $.tool.call({ tool: 'TodoWrite', todos: [{ content: 'Ship it', status: 'in_progress', activeForm: 'Shipping it' }] })
+    const result = await $.command.run({ command: 'activity', args: '' } as never)
+    expect(result.text).toContain('- Todos: 0/1 done, now: Shipping it')
+
+    const row = (surface: 'vscode' | 'terminal', requestId: string) =>
+      $.ui.mount({
+        plugin: 'activity-line',
+        surface,
+        component: 'CommandOutput',
+        requestId,
+        props: { command: 'activity', args: '', text: result.text ?? '', isErrored: false },
+      })
+    const first = await row('vscode', 'm1')
+    expect(await first.find({ text: /◐ Shipping it/ })).toBeDefined()
+    const second = await row('vscode', 'm2')
+    expect(await second.find({ text: /◐ Shipping it/ })).toBeDefined()
+    await first.redraw()
+    expect(await first.find({ text: /newest \/activity below is live/ })).toBeDefined()
+
+    const term = await row('terminal', 'm3')
+    expect(await term.find({ text: 'Activity dashboard opened above the prompt.' })).toBeDefined()
   })
 })
