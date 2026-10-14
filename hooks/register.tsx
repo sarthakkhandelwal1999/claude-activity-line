@@ -1,198 +1,179 @@
 import { atom, read, update } from 'claude-code'
-import type { AgentStatus, Color, EngineInterface, Register, RenderElement, Timer } from 'claude-code'
+import type { AgentStatus, EngineInterface, Register, RenderSurface, Timer } from 'claude-code'
 
-import type { ActivityAgent, ActivitySnapshot, ActivityTodo, ActivityTool } from '../types'
-import {
-  bar,
-  contextTone,
-  cut,
-  duration,
-  elapsedTone,
-  fit,
-  groupTools,
-  limitTitle,
-  limitTone,
-  resetIn,
-  SEPARATOR,
-  todoCounts,
-  tokens,
-} from './model'
-import type { Part, Seg, Tone } from './model'
+import type { ActivityAgent, ActivityCategory, ActivitySnapshot, ActivityTask, ActivityTodo, ActivityTool } from '../types'
+import { demoSnapshot } from './demo'
+import { dashboard, line } from './draw'
+import { fit, plain } from './model'
 
 const PANE = 'activity'
-const TICK_MS = 1500
+const TICK_MS = 1000
+const BREAKDOWN_EVERY_MS = 15_000
 const LIVE: ReadonlySet<AgentStatus> = new Set(['pending', 'running', 'waiting'])
+// Surfaces that draw the line under the prompt; any other gets the status text.
+const LINE_SURFACES: ReadonlySet<RenderSurface> = new Set(['terminal', 'desktop'])
+// The engine's hint row is indented 2; the line adds 2 more and keeps 2 spare.
+const LINE_INSET = 6
 
-const EMPTY: ActivitySnapshot = { now: 0, rateLimits: [], tools: [], agents: [], todos: [] }
+const EMPTY: ActivitySnapshot = { now: 0, categories: [], rateLimits: [], tools: [], agents: [], tasks: [], todos: [] }
 const snapshot = atom({ plugin: 'activity-line', key: 'snapshot' } as const, EMPTY)
 
-/** Theme colours, so the line reads in light and dark themes alike. */
-const STYLE: Record<Tone, { color?: Color; dimColor?: boolean }> = {
-  ok: { color: 'success' },
-  warn: { color: 'warning' },
-  crit: { color: 'error' },
-  label: { dimColor: true },
-  muted: { color: 'inactive' },
-  text: {},
-  tool: { color: 'suggestion' },
-  agent: { color: 'merged' },
-  todo: { color: 'planMode' },
-  cost: { color: 'claude' },
-}
-
-type Tables = ReturnType<EngineInterface['ui']['resolve']>
-type Call = ActivityTool & { agentId?: string }
-
-// The live figures. A hot reload starts these over; session.start restores
-// the last snapshot from $.state, which the host keeps.
-const calls = new Map<string, Call>()
+// ── Live figures ────────────────────────────────────────────────────────────
+// Module state: a hot reload starts it over; session.start restores the last
+// snapshot from $.state, which the host keeps for the session.
+const calls = new Map<string, ActivityTool>()
+const firstSeen = new Map<string, number>()
+let tasks: ActivityTask[] = []
 let todos: ActivityTodo[] = []
 let agents: ActivityAgent[] = []
+let categories: ActivityCategory[] = []
 let context: ActivitySnapshot['context']
+let compactAt: number | undefined
+let model: string | undefined
+let startedAt: number | undefined
 let rateLimits: ActivitySnapshot['rateLimits'] = []
 let costUsd: number | undefined
+let surfaces: RenderSurface[] = []
+let isDemo = false
 let published = ''
+let statusText: string | undefined
+let breakdownAt = 0
+let breakdownPending: Timer | undefined
 let ticker: Timer | undefined
+const openedFor = new Set<string>()
 let nextId = 0
 
-/** Writes the snapshot when what it shows changed: each second while a tool runs, else each minute. */
+function current(now: number): ActivitySnapshot {
+  if (isDemo) return demoSnapshot(now)
+  return {
+    now,
+    startedAt,
+    model,
+    context: context && { ...context, compactAt },
+    categories,
+    rateLimits,
+    costUsd,
+    tools: [...calls.values()],
+    agents,
+    tasks,
+    todos,
+  }
+}
+
+/**
+ * Writes the snapshot when what it shows changed: each second while anything
+ * runs (elapsed times tick), else every 15 s (reset countdowns, session age).
+ */
 async function publish($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
-  const tools = [...calls.values()].map(({ tool, startedAt, inAgent }) => ({ tool, startedAt, inAgent }))
-  const next: ActivitySnapshot = { now, context, rateLimits, costUsd, tools, agents, todos }
-  const grain = tools.length > 0 ? 1000 : 60_000
-  const key = JSON.stringify({ ...next, now: Math.floor(now / grain) })
-  if (key === published) return
-  published = key
-  await update($, snapshot, () => next)
+  const next = current(now)
+  const isBusy = next.tools.length + next.agents.length + next.tasks.length > 0
+  const key = JSON.stringify({ ...next, now: Math.floor(now / (isBusy ? 1000 : 15_000)) })
+  if (key !== published) {
+    published = key
+    await update($, snapshot, () => next)
+  }
+  // VS Code and the other remote surfaces draw no line under the prompt; they
+  // get the same line as this plugin's status text.
+  const wantsText = surfaces.some(s => !LINE_SURFACES.has(s))
+  const text = wantsText ? plain(fit(next, 160)) || undefined : undefined
+  if (text !== statusText) {
+    statusText = text
+    $.ui.status(text)
+  }
+}
+
+/**
+ * The model, the auto-compact threshold and what fills the context, as
+ * /context counts them (estimated locally). At most every 15 s; a call inside
+ * that window is postponed to its end rather than dropped, so a /model switch
+ * is never left unmeasured.
+ */
+async function measureBreakdown($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+  const wait = breakdownAt + BREAKDOWN_EVERY_MS - now
+  if (wait > 0) {
+    breakdownPending ??= $.clock.after(wait, () => {
+      breakdownPending = undefined
+      measureBreakdown($)
+        .then(() => publish($))
+        .catch(() => undefined)
+    })
+    return
+  }
+  breakdownAt = now
+  const usage = await $.session.usage({ breakdown: 'summary' })
+  const b = usage.context.breakdown
+  if (b === undefined) return
+  model = b.model
+  compactAt = b.isAutoCompactEnabled ? b.autoCompactThreshold : undefined
+  categories = b.categories
+    .filter(c => c.kind === 'used' && c.tokens > 0)
+    .sort((x, y) => y.tokens - x.tokens)
+    .map(c => ({ name: c.name, tokens: c.tokens, color: c.color }))
+}
+
+/** The status line's figures: free to read, so read every second, mid-turn too. */
+async function readUsage($: EngineInterface): Promise<void> {
+  const usage = await $.session.usage()
+  startedAt = usage.startedAt
+  context = usage.context
+  rateLimits = usage.rateLimits
+  costUsd = usage.cost?.usd
 }
 
 async function tick($: EngineInterface): Promise<void> {
-  agents = (await $.agent.list())
-    .filter(a => LIVE.has(a.status))
-    .map(a => ({ id: a.id, type: a.type, description: a.description, status: a.status }))
+  const now = await $.clock.now()
+  await readUsage($)
+  const live = (await $.agent.list()).filter(a => LIVE.has(a.status))
+  const ids = new Set(live.map(a => a.id))
+  for (const id of firstSeen.keys()) if (!ids.has(id)) firstSeen.delete(id)
+  agents = live.map(a => {
+    if (!firstSeen.has(a.id)) firstSeen.set(a.id, now)
+    return { id: a.id, type: a.type, description: a.description, status: a.status, since: firstSeen.get(a.id) ?? now }
+  })
   await publish($)
+}
+
+/**
+ * A new conversation in the same process (/clear, /resume): nothing of the
+ * old one stays. The state resets at once; the fresh figures are read just
+ * after, outside session.end's short time budget.
+ */
+async function startOver($: EngineInterface): Promise<void> {
+  calls.clear()
+  firstSeen.clear()
+  todos = []
+  agents = []
+  tasks = []
+  categories = []
+  context = undefined
+  costUsd = undefined
+  breakdownAt = 0
+  await publish($)
+  $.clock.after(100, () => {
+    readUsage($)
+      .then(() => measureBreakdown($))
+      .then(() => publish($))
+      .catch(() => undefined)
+  })
 }
 
 async function restore($: EngineInterface): Promise<void> {
   const saved = await read($, snapshot)
   if (todos.length === 0) todos = saved.todos
+  if (tasks.length === 0) tasks = saved.tasks ?? []
+  if (categories.length === 0) categories = saved.categories ?? []
+  // Agents keep their age across a reload.
+  for (const a of saved.agents ?? []) if (!firstSeen.has(a.id)) firstSeen.set(a.id, a.since)
   context ??= saved.context
+  compactAt ??= saved.context?.compactAt
+  model ??= saved.model
   if (rateLimits.length === 0) rateLimits = saved.rateLimits
   costUsd ??= saved.costUsd
 }
 
-function styled(Text: Tables['Text'], seg: Seg): RenderElement {
-  return (
-    <Text {...STYLE[seg.tone]} bold={seg.bold}>
-      {seg.text}
-    </Text>
-  )
-}
-
-function line(Text: Tables['Text'], parts: readonly Part[]): RenderElement {
-  const children: RenderElement[] = []
-  parts.forEach((part, i) => {
-    if (i > 0) children.push(<Text color="inactive">{SEPARATOR}</Text>)
-    for (const seg of part.segs) children.push(styled(Text, seg))
-  })
-  return <Text wrap="truncate-end">{children}</Text>
-}
-
-function meter(t: Tables, label: string, percent: number, tone: Tone, cells: number, after: string): RenderElement {
-  const { filled, empty } = bar(percent, cells)
-  return (
-    <t.Box>
-      <t.Text dimColor>{label.padEnd(9)}</t.Text>
-      <t.Text {...STYLE[tone]}>{filled}</t.Text>
-      <t.Text color="inactive">{empty}</t.Text>
-      <t.Text {...STYLE[tone]} bold>
-        {` ${String(percent).padStart(3)}%`}
-      </t.Text>
-      <t.Text color="inactive">{`  ${after}`}</t.Text>
-    </t.Box>
-  )
-}
-
-function heading(t: Tables, title: string, count: string): RenderElement {
-  return (
-    <t.Box marginTop={1}>
-      <t.Text bold>{title}</t.Text>
-      <t.Text color="inactive">{` ${count}`}</t.Text>
-    </t.Box>
-  )
-}
-
-function dashboard(t: Tables, s: ActivitySnapshot, columns: number): RenderElement {
-  const cells = Math.max(8, Math.min(30, columns - 28))
-  const rows: RenderElement[] = []
-
-  if (s.context?.percent !== undefined && s.context.tokens !== undefined) {
-    const { percent, tokens: used, window } = s.context
-    rows.push(meter(t, 'Context', percent, contextTone(percent), cells, `${tokens(used)} / ${tokens(window)}`))
-  } else {
-    rows.push(
-      <t.Text color="inactive">{`${'Context'.padEnd(9)}no reading yet${s.context ? ` (window ${tokens(s.context.window)})` : ''}`}</t.Text>,
-    )
-  }
-  for (const limit of s.rateLimits) {
-    const reset = resetIn(limit, s.now, true)
-    rows.push(meter(t, limitTitle(limit.kind), limit.percentUsed, limitTone(limit.percentUsed), cells, reset ? `resets in ${reset}` : ''))
-  }
-  if (s.costUsd !== undefined) {
-    rows.push(
-      <t.Box>
-        <t.Text dimColor>{'Cost'.padEnd(9)}</t.Text>
-        <t.Text {...STYLE.cost} bold>{`$${s.costUsd.toFixed(2)}`}</t.Text>
-      </t.Box>,
-    )
-  }
-
-  const groups = groupTools(s.tools)
-  rows.push(heading(t, 'Tools', groups.length === 0 ? 'idle' : `${s.tools.length} running`))
-  for (const g of groups) {
-    const elapsed = s.now - g.startedAt
-    rows.push(
-      <t.Box>
-        <t.Text {...STYLE.tool}>{'  ● '}</t.Text>
-        <t.Text {...STYLE.tool} bold>{cut(g.name, columns - 20)}</t.Text>
-        <t.Text color="inactive">{g.count > 1 ? ` ×${g.count}` : ''}</t.Text>
-        <t.Text {...STYLE[elapsedTone(elapsed)]}>{`  ${duration(elapsed)}`}</t.Text>
-      </t.Box>,
-    )
-  }
-
-  rows.push(heading(t, 'Agents', s.agents.length === 0 ? 'none running' : `${s.agents.length} running`))
-  for (const a of s.agents) {
-    rows.push(
-      <t.Box>
-        <t.Text {...STYLE.agent}>{'  ◆ '}</t.Text>
-        <t.Text {...STYLE.agent} bold>{a.type}</t.Text>
-        <t.Text color={a.status === 'running' ? 'success' : 'warning'}>{`  ${a.status}`}</t.Text>
-        <t.Text>{`  ${cut(a.description, Math.max(10, columns - a.type.length - 20))}`}</t.Text>
-      </t.Box>,
-    )
-  }
-
-  const { done, total } = todoCounts(s.todos)
-  rows.push(heading(t, 'Todos', total === 0 ? 'no list yet' : `${done}/${total} done`))
-  for (const todo of s.todos) {
-    const isDone = todo.status === 'completed'
-    const isActive = todo.status === 'in_progress'
-    const mark = isDone ? '  ☑ ' : isActive ? '  ◐ ' : '  ☐ '
-    const tone: Tone = isDone ? 'ok' : isActive ? 'todo' : 'muted'
-    rows.push(
-      <t.Box>
-        <t.Text {...STYLE[tone]}>{mark}</t.Text>
-        <t.Text {...(isActive ? STYLE.todo : isDone ? STYLE.muted : {})} bold={isActive} strikethrough={isDone}>
-          {cut(isActive ? todo.activeForm || todo.content : todo.content, columns - 6)}
-        </t.Text>
-      </t.Box>,
-    )
-  }
-
-  return <t.Box flexDirection="column">{rows}</t.Box>
-}
+// ── Hooks ───────────────────────────────────────────────────────────────────
 
 export const register: Register = (on, options) => {
   const placement = String(options.placement ?? 'below')
@@ -200,20 +181,18 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
+    isDemo = (await $.env.get('ACTIVITY_LINE_DEMO')) === '1'
     await $.command.register({
       name: 'activity',
-      description: 'Open the activity dashboard: context, rate limits, tools, agents and todos',
+      description: 'Open the activity dashboard: context, rate limits, what is running, todos',
     })
     await restore($)
-    const usage = await $.session.usage()
-    context = usage.context
-    rateLimits = usage.rateLimits
-    costUsd = usage.cost?.usd
+    await readUsage($)
+    surfaces = [...(await $.session.surfaces())]
+    await measureBreakdown($).catch(() => undefined)
     await publish($)
 
-    // Surfaces with no line under the prompt (VS Code, the mobile app) get the pane.
-    const surfaces = await $.session.surfaces()
-    const hasLine = surfaces.includes('terminal') || surfaces.includes('desktop')
+    const hasLine = surfaces.some(s => LINE_SURFACES.has(s))
     if (openPane === 'always' || (openPane === 'auto' && surfaces.length > 0 && !hasLine)) {
       void $.ui.open({ id: PANE, title: 'Activity' })
     }
@@ -222,6 +201,28 @@ export const register: Register = (on, options) => {
     ticker = $.clock.every(TICK_MS, () => {
       tick($).catch(() => undefined)
     })
+    return result
+  })
+
+  // The VS Code panel and the other remote surfaces attach after the session
+  // starts: each new one without a line under its prompt gets the dashboard.
+  on('session.attach', async ($, e, next) => {
+    const result = await next(e)
+    if (!surfaces.includes(e.surface)) surfaces.push(e.surface)
+    if (openPane === 'auto' && !LINE_SURFACES.has(e.surface) && !openedFor.has(e.clientId)) {
+      openedFor.add(e.clientId)
+      void $.ui.open({ id: PANE, title: 'Activity' })
+    }
+    await publish($)
+    return result
+  })
+
+  on('session.detach', async ($, e, next) => {
+    const result = await next(e)
+    if (e.reason !== 'end') {
+      surfaces = [...(await $.session.surfaces())]
+      await publish($)
+    }
     return result
   })
 
@@ -234,24 +235,57 @@ export const register: Register = (on, options) => {
     context = e.context
     rateLimits = e.rateLimits
     costUsd = e.cost?.usd
+    if (e.changed.includes('context')) await measureBreakdown($).catch(() => undefined)
     await publish($)
     return next(e)
   })
 
   on('tool.call', async ($, e, next) => {
     const id = e.tool_use_id ?? `local-${nextId++}`
-    calls.set(id, { tool: String(e.tool), startedAt: await $.clock.now(), inAgent: e.agentId !== undefined, agentId: e.agentId })
-    await publish($)
     try {
+      calls.set(id, { id, tool: String(e.tool), startedAt: await $.clock.now(), agentId: e.agentId })
+      await publish($).catch(() => undefined)
       const ran = await next(e)
-      if (e.tool === 'TodoWrite' && ran.deny === undefined && ran.isError !== true && e.agentId === undefined) {
+      const isOk = ran.deny === undefined && ran.isError !== true
+      if (isOk && e.tool === 'TodoWrite' && e.agentId === undefined) {
         todos = e.todos.map(({ content, status, activeForm }) => ({ content, status, activeForm }))
+      }
+      // A shell goes to the background when asked, on ctrl+b or on its
+      // timeout; each way its result names the task. A monitor always does.
+      if (isOk && e.tool === 'Bash') {
+        const taskId = (ran.result as { backgroundTaskId?: string } | undefined)?.backgroundTaskId
+        if (taskId !== undefined) tasks = [...tasks, { id: taskId, type: 'shell', description: e.description ?? e.command, since: await $.clock.now() }]
+      }
+      if (isOk && e.tool === 'Monitor') {
+        const taskId = (ran.result as { taskId?: string } | undefined)?.taskId
+        if (taskId !== undefined) tasks = [...tasks, { id: taskId, type: 'monitor', description: e.description, since: await $.clock.now() }]
+      }
+      if (isOk && e.tool === 'TaskStop') {
+        const stopped = e.task_id ?? e.shell_id
+        tasks = tasks.filter(task => task.id !== stopped)
       }
       return ran
     } finally {
       calls.delete(id)
-      await publish($)
+      await publish($).catch(() => undefined)
     }
+  })
+
+  // The end of every main turn lists the background work still in flight: the
+  // authoritative list, which also drops what finished in between.
+  on('classic.Stop', async ($, e, next) => {
+    const now = await $.clock.now()
+    const before = new Map(tasks.map(task => [task.id, task.since]))
+    tasks = (e.background_tasks ?? [])
+      .filter(task => task.type !== 'subagent')
+      .map(task => ({
+        id: task.id,
+        type: task.type,
+        description: task.command ?? task.name ?? task.description,
+        since: before.get(task.id) ?? now,
+      }))
+    await publish($)
+    return next(e)
   })
 
   // A safety net: a call whose result never came back leaves no ghost behind
@@ -260,50 +294,43 @@ export const register: Register = (on, options) => {
     for (const [id, call] of calls) {
       if (call.agentId === e.agentId) calls.delete(id)
     }
+    if (e.agentId === undefined) await measureBreakdown($).catch(() => undefined)
     await publish($)
     return next(e)
   })
 
+  // /clear and /resume end one conversation and go on with another in the
+  // same process; no session.start follows. Any other end is the process's.
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') {
-      calls.clear()
-      todos = []
-      agents = []
-      context = undefined
-      costUsd = undefined
-      await publish($)
-    } else {
-      ticker?.cancel()
-    }
-    return next(e)
+    const result = await next(e)
+    if (e.reason === 'clear' || e.reason === 'resume') await startOver($).catch(() => undefined)
+    return result
   })
 
-  // The line under the prompt: the engine's own hint row stays as it is (its
-  // pills live), and the activity row is drawn beneath it.
+  // The line under the prompt, beneath the engine's own hint row, which stays
+  // as the engine draws it (its pills live).
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const engine = await next(e)
     if (placement !== 'below') return engine
-    const parts = fit(await read($, snapshot), (e.viewport?.columns ?? 120) - 2)
-    if (parts.length === 0) return engine
-    const { Box, Text } = $.ui.resolve(e)
+    const rows = fit(await read($, snapshot), (e.viewport?.columns ?? 120) - LINE_INSET)
+    if (rows.length === 0) return engine
+    const t = $.ui.resolve(e)
     return (
-      <Box flexDirection="column">
+      <t.Box flexDirection="column">
         {engine}
-        {line(Text, parts)}
-      </Box>
+        <t.Box paddingLeft={2}>{line(t, rows)}</t.Box>
+      </t.Box>
     )
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (placement !== 'above' || e.props.hasSurvey) return next(e)
-    const parts = fit(await read($, snapshot), e.props.bodyColumns)
-    if (parts.length === 0) return next(e)
-    const { Text } = $.ui.resolve(e)
-    return line(Text, parts)
+    const rows = fit(await read($, snapshot), e.props.bodyColumns - 1)
+    if (rows.length === 0) return next(e)
+    return line($.ui.resolve(e), rows)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const t = $.ui.resolve(e)
-    return dashboard(t, await read($, snapshot), e.props.bodyColumns)
+    return dashboard($.ui.resolve(e), await read($, snapshot), e.props.bodyColumns, e.props.scroll.bodyRows)
   })
 }

@@ -1,10 +1,10 @@
 {
   "name": "activity-line",
-  "version": "0.2.0",
-  "description": "A colour-coded line under the prompt and an /activity dashboard: context fill, rate limits, cost, running tools, running agents and todo progress.",
+  "version": "0.3.0",
+  "description": "One colour-coded row under the prompt and an /activity dashboard: context left before auto-compact, rate limits with reset times, running tools, agents and background shells, todo progress, model and cost.",
   "author": { "name": "Sarthak Khandelwal" },
   "license": "MIT",
-  "keywords": ["status line", "context", "rate limits", "agents", "todos"],
+  "keywords": ["status line", "context", "auto-compact", "rate limits", "agents", "background tasks", "todos", "dashboard"],
   "types": "./types/index.d.ts",
   "userConfig": {
     "placement": {
